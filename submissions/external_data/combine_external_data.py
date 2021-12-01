@@ -108,8 +108,7 @@ def add_car_counts(data):
     return out
   
   def add_covid_data(data):
-    df2  = pd.read_csv('https://covid.ourworldindata.org/data/owid-covid-data.csv')
-    df2  = df2.loc[df2['location'] == 'France']
+    df2  = pd.read_csv('Found data/Covid_Data_Exhaustive_France.csv')
     mask = (df2['date'] >= '2020-09-01') & (df2['date'] <= '2021-09-09')
     df2  = df2.loc[mask]
     data.rename(columns = {'date': 'datetime'}, inplace = True)
