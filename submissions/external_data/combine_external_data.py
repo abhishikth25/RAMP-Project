@@ -4,7 +4,12 @@
 #external data, in the correct format.
 
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+from geopy.distance import distance
+from shapely.geometry import Point
+from shapely.geometry.polygon import Polygon
+import holidays
+from xgboost import XGBRegressor
 
 def add_mobility_data(data):
     #Read in mobility data
@@ -35,7 +40,30 @@ def add_mobility_data(data):
                 'sub_region_1', 'sub_region_2', 'metro_area', 
                 'iso_3166_2_code', 'census_fips_code', 'place_id'], axis=1)
     
-    #Merge cleaned mobility data with original dataframe
+    #Read in bike counter data
+    bike_counters = pd.read_parquet("../../data/train.parquet")
+    bike_counters = bike_counters.sort_values('date')
+    
+    #Make a train dataset, to predict log bike count from different mobility components
+    train_data = pd.merge_asof(bike_counters[['date','log_bike_count']],mobility,on='date')
+    #Split train data into X all mobility components
+    X_train = train_data.drop(['date','log_bike_count'],axis=1)
+    #And y the log bike count
+    y_train = train_data['log_bike_count']
+    
+    #Train a linear XGBregressor to predict bike count from mobilities
+    regressor = XGBRegressor(booster='gblinear')
+    regressor.fit(X_train, y_train)
+    #Find linear weights of each mobility component
+    coeffs = regressor.coef_
+    
+    #Compute new column weighted mobility, a linear combination of previous mobilities
+    mobility['weighted_mob'] = mobility.drop('date',axis=1).multiply(coeffs, axis=1).sum(axis=1)
+    #Drop previous columns to only keep weighted data, and greatly reduce dimension
+    mobility = mobility.drop(['recreation_mob','grocery_mob','parks_mob',
+                             'transit_mob','workplaces_mob','residential_mob'],axis=1)
+    
+    #Merge mobility data with original dataframe
     out = pd.merge_asof(data, mobility, on='date')
     
     return out
@@ -107,23 +135,100 @@ def add_car_counts(data):
     
     return out
   
-  def add_covid_data(data):
-    df2  = pd.read_csv('Found data/Covid_Data_Exhaustive_France.csv')
-    mask = (df2['date'] >= '2020-09-01') & (df2['date'] <= '2021-09-09')
-    df2  = df2.loc[mask]
-    data.rename(columns = {'date': 'datetime'}, inplace = True)
-    data[['date','time']] = df1_copy.datetime.str.split(" ",expand = True)
-
-    relevant_df2 = df2[['date','new_cases','new_deaths','total_vaccinations','people_vaccinated', 
-                    'people_fully_vaccinated','stringency_index']]
-    out = relevant_df2.merge(data, how ='left', on ='date')
-    out = out.drop('date', axis = 1)
-    out = out.drop('time', axis = 1)
-    out.rename(columns = {'datetime': 'date'}, inplace = True)
+def add_covid_data(data):
+    #Read in covid data
+    covid  = pd.read_csv('Found data/Covid_Data_Exhaustive_France.csv',sep=';')
     
+    #Filter to include only relevant dates
+    mask = (covid['date'] >= '2020-09-01') & (covid['date'] <= '2021-10-21')
+    covid  = covid.loc[mask]
+    
+    #Convert string into datetime column
+    covid['date'] = pd.to_datetime(covid['date'])
+
+    #Relevant data columns to include
+    relevant_covid = covid[['date','new_cases','new_deaths','total_vaccinations','people_vaccinated', 
+                    'people_fully_vaccinated','stringency_index']]
+    
+    #Merge covid data with original dataframe
+    out = pd.merge_asof(data, relevant_covid, on='date')
+    
+    return out             
+
+def add_construction_data(data):
+    #Read in construction data
+    construction = pd.read_csv("Found data/chantiers-perturbants.csv", sep=";")
+    
+    #Read in bike counter data
+    bike_counters = pd.read_parquet("../../data/train.parquet")
+    
+    dates = pd.date_range(data.min()['date'], data.max()['date'])
+    #Columns count whether there was a construction within x metres of a bike counter
+    cols = ['500m construction','1000m construction']
+    obstruction_counts = pd.DataFrame(index=dates, columns=cols)
+    obstruction_counts.fillna(0, inplace=True)
+    
+    #Extract coordinates of unique bike counters
+    counter_locations = bike_counters.groupby(['latitude','longitude']).size().reset_index()
+    counter_weights = dict()
+    
+    #Compute average bikes passing by a counter, to give importance weights to counter
+    for index, row in counter_locations.iterrows():
+        counter_logs = bike_counters[(bike_counters['latitude']==row['latitude']) & 
+                                     (bike_counters['longitude']==row['longitude'])]['bike_count']
+        total_count = counter_logs.sum()
+        average_count = total_count/counter_logs.shape[0]
+        #Fill a dict with as keys the geographical location, and as values average bike count
+        counter_weights[(row['longitude'],row['latitude'])] = average_count
+    
+    #For all construction instances, check if it is close to a bike counter
+    for index, row in construction.iterrows():
+        #Find location, start and end date of construction
+        coords = eval(row[-2])
+        start = pd.to_datetime(row[10])
+        end = pd.to_datetime(row[11])
+        
+        #Initiate polygon shape, representing area covered by construction
+        if coords['type'] == 'Polygon':
+            shape = Polygon(eval(row[-2])['coordinates'][0])
+        if coords['type'] == 'MultiPolygon':
+            shape = Polygon(eval(row[-2])['coordinates'][0][0])
+            
+        #For all bike counters check if it is close to construction
+        for k, v in counter_weights.items():
+            place = Point(k)
+            #Multiply distance in degrees by 111, to get distance in km
+            dist = shape.distance(place) * 111 
+            #Check how close bike counter is from construction area
+            if (dist < 0.5):
+                #Add average bike count to dataframe, indicating impact of obstruction
+                obstruction_counts.loc[(obstruction_counts.index>=start) & 
+                    (obstruction_counts.index<=end), '500m construction'] += v
+            if (dist < 1):
+                obstruction_counts.loc[(obstruction_counts.index>=start) & 
+                    (obstruction_counts.index<=end), '1000m construction'] += v
+    
+    #Merge construction data with original dataframe
+    out = pd.merge_asof(data, obstruction_counts, left_on='date', right_index=True)
+
     return out
 
-
+def add_holidays(data):
+    #Make empty dataframe with 0 for every date in original dataframe
+    dates = pd.date_range(data.min()['date'], data.max()['date'])
+    holiday = pd.DataFrame(index=dates, columns=['holiday'])
+    holiday.fillna(0, inplace=True)
+    
+    #Load in French holidays in 2020 and 2021
+    French_holidays = holidays.FR(years=[2020,2021])
+    #Add a binary 1 code for if a date is an official holiday
+    for date in dates:
+        if date in French_holidays:
+            holiday.loc[date] = 1
+    
+    #Merge holiday data with original dataframe
+    out = pd.merge_asof(data, holiday, left_on='date', right_index=True)
+    return out
 
 if __name__ == "__main__":
     """Main framework that sequentially processes and adds data from different 
@@ -137,5 +242,7 @@ if __name__ == "__main__":
     external = add_weather_data(external)
     external = add_car_counts(external)
     external = add_covid_data(external)
+    external = add_construction_data(external)
+    external = add_holidays(external)
     
     external.to_csv("External_processed_data.csv",index=False)
