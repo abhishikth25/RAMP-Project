@@ -10,6 +10,7 @@ from shapely.geometry import Point
 from shapely.geometry.polygon import Polygon
 import holidays
 from xgboost import XGBRegressor
+import numpy as np
 
 def add_mobility_data(data):
     #Read in mobility data
@@ -230,6 +231,18 @@ def add_holidays(data):
     out = pd.merge_asof(data, holiday, left_on='date', right_index=True)
     return out
 
+def add_daylight_saving(data):
+    dates = pd.date_range(data.min()['date'], data.max()['date'])
+    daylights = pd.DataFrame(index=dates,columns=['daylight'])
+    for date in dates:
+        days = (date - pd.datetime(2000,12,21)).days
+        x = 1 - np.tan(np.radians(48.84)) * np.tan(np.radians(23.44) * np.cos(days*2*np.pi/365.25))
+        daylight = 24 * np.degrees(np.arccos(1 - np.clip(x, 0, 2)))/180
+        daylights.loc[date]['daylight'] = daylight
+    
+    out = pd.merge_asof(data, daylights, left_on='date', right_index=True)
+    return out
+
 if __name__ == "__main__":
     """Main framework that sequentially processes and adds data from different 
     source files into our one dataframe containing all complete external data"""
@@ -244,5 +257,6 @@ if __name__ == "__main__":
     external = add_covid_data(external)
     external = add_construction_data(external)
     external = add_holidays(external)
+    external = add_daylight_saving(external)
     
     external.to_csv("External_processed_data.csv",index=False)

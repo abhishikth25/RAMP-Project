@@ -38,7 +38,7 @@ def _merge_external_data(X):
     
     cols = ['date','weighted_mob','Temp','Wind','Rain','Cloud','3h_car_count',
             '1h_car_count','new_cases','total_vaccinations','stringency_index',
-            '500m construction','1000m construction']
+            '500m construction','1000m construction','daylight']
     X = pd.merge_asof(X.sort_values('date'), df_ext[cols].sort_values('date'), on='date')
     # Sort back to the original order
     X = X.sort_values('orig_index')
@@ -57,7 +57,7 @@ def get_estimator():
 
     numeric_cols = ['weighted_mob','Temp','Wind','Rain','Cloud',
                     '3h_car_count','1h_car_count','new_cases','total_vaccinations',
-                    'stringency_index','500m construction','1000m construction']
+                    'stringency_index','500m construction','1000m construction','daylight']
 
     preprocessor = ColumnTransformer([
         ('date', "passthrough", date_cols),
@@ -67,8 +67,8 @@ def get_estimator():
 
     #regressor = RandomForestRegressor(criterion="squared_error",n_estimators=250,max_depth=13)
     #regressor = XGBRegressor(objective='reg:squarederror',verbosity=0)
-    regressor = HistGradientBoostingRegressor(loss='squared_error')
-    #regressor = GradientBoostingRegressor(loss='squared_error')
+    #regressor = HistGradientBoostingRegressor(loss='squared_error')
+    regressor = GradientBoostingRegressor(loss='squared_error')
     
     paramsRF = dict(n_estimators=[100,250],max_depth=[13,18])
     paramsXGB = dict(learning_rate=[0.05,0.1,0.15,0.2], max_depth=[2,4,6,8,10], 
@@ -84,7 +84,7 @@ def get_estimator():
         preprocessor,
         #regressor
         #GridSearchCV(regressor, paramsHGB, cv=2, n_jobs=-1, refit=True)
-        RandomizedSearchCV(regressor, paramsHGB, n_iter=15, n_jobs=-1, random_state=1, refit=True)
+        RandomizedSearchCV(regressor, paramsGB, n_iter=5, n_jobs=-1, random_state=1, refit=True)
         #BayesSearchCV(regressor, paramsHGB, n_iter=69, n_jobs=-1, refit=True, scoring='neg_mean_squared_error')
     )
     
